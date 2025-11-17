@@ -29,7 +29,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TELEGRAM_TOKEN:
     raise RuntimeError("ENV TELEGRAM_TOKEN belum di-set!")
 
-OWNER_IDS = {123456789}  # GANTI dengan Telegram user id lu
+# GANTI DENGAN TELEGRAM USER ID LU
+OWNER_IDS = {123456789}
 
 BOT_NAME = "Installer RDP"
 BOT_VERSION = "1.0"
@@ -37,9 +38,9 @@ BOT_VERSION = "1.0"
 USERS_FILE = Path("users.json")
 INSTALLS_FILE = Path("installs.json")
 
-# daftar OS yang tersedia (bisa lu ubah sesuka hati)
+# daftar OS yang tersedia
 OS_LIST: List[Dict[str, str]] = [
-    {"id": "win-10-pro", "name": "Windows 10 Pro", "note": "RDP umum, ringan"},
+    {"id": "win-10-pro", "name": "Windows 10 Pro", "note": "RDP umum, cukup ringan"},
     {"id": "win-11-pro", "name": "Windows 11 Pro", "note": "UI modern, agak berat"},
     {"id": "win-serv-2019", "name": "Windows Server 2019", "note": "Stabil untuk server"},
     {"id": "win-serv-2022", "name": "Windows Server 2022", "note": "Terbaru, enterprise"},
@@ -150,6 +151,17 @@ def build_main_menu() -> InlineKeyboardMarkup:
     )
 
 
+# helper text OS list biar bisa dipakai di /oslist & menu
+def format_oslist_text() -> str:
+    lines = ["💽 *DAFTAR OS TERSEDIA:*\n"]
+    for osdata in OS_LIST:
+        lines.append(
+            f"`{osdata['id']}` - *{osdata['name']}*\n"
+            f"  _{osdata['note']}_\n"
+        )
+    return "\n".join(lines)
+
+
 # =====================================================
 # COMMAND HANDLERS
 # =====================================================
@@ -162,8 +174,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Siap membuat RDP Windows di VPS kamu dengan mudah?\n\n"
         "*PERINTAH UTAMA*\n"
         "`/login [username] [password]` - Daftar/login ke bot\n"
-        "`/install [ip] [port] [os_id]` - Request install OS ke VPS\n"
         "`/oslist` - Lihat daftar OS tersedia\n"
+        "`/install [ip] [port] [os_id]` - Request install OS ke VPS\n"
         "`/status` - Lihat status install aktif\n"
         "`/history` - Lihat riwayat instalasi\n\n"
         "_InstallerRDP — Template bot installer VPS untuk Anda_"
@@ -279,13 +291,7 @@ async def logout_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------- OS LIST & INSTALL ----------
 
 async def oslist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lines = ["💽 *DAFTAR OS TERSEDIA:*\n"]
-    for osdata in OS_LIST:
-        lines.append(
-            f"`{osdata['id']}` - *{osdata['name']}*\n"
-            f"  _{osdata['note']}_\n"
-        )
-    text = "\n".join(lines)
+    text = format_oslist_text()
     await update.effective_message.reply_markdown(text)
 
 
@@ -335,6 +341,258 @@ async def install_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     installs.append(install_obj)
     save_installs(installs)
 
-    await message.reply_text(
+    reply_text = (
         "✅ *Request install berhasil disimpan!*\n\n"
-        f"ID Install: `{
+        f"ID Install: `{install_obj['install_id']}`\n"
+        f"IP VPS: `{ip}:{port}`\n"
+        f"OS: *{os_data['name']}* (`{os_id}`)\n\n"
+        "_Template ini belum menjalankan SSH beneran._\n"
+        "Kamu bisa buat worker terpisah yang baca file `installs.json` untuk eksekusi script."
+    )
+
+    await message.reply_text(reply_text, parse_mode="Markdown")
+
+
+@login_required
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    user = update.effective_user
+
+    installs = get_installs()
+    my_installs = [
+        i for i in installs
+        if i["user_id"] == user.id and i["status"] in ("pending", "running")
+    ]
+
+    if not my_installs:
+        await message.reply_text("Tidak ada instalasi aktif / pending.")
+        return
+
+    lines = ["📊 *STATUS INSTALL AKTIF:*\n"]
+    for inst in my_installs:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(inst["created_at"]))
+        lines.append(
+            f"• `{inst['install_id']}` – *{inst['os_name']}*\n"
+            f"  VPS: `{inst['ip']}:{inst['port']}`\n"
+            f"  Status: *{inst['status'].upper()}* (dibuat {ts})\n"
+        )
+
+    await message.reply_markdown("\n".join(lines))
+
+
+@login_required
+async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    user = update.effective_user
+
+    installs = get_installs()
+    my_installs = [i for i in installs if i["user_id"] == user.id]
+
+    if not my_installs:
+        await message.reply_text("Belum ada riwayat instalasi.")
+        return
+
+    my_installs_sorted = sorted(
+        my_installs, key=lambda x: x["created_at"], reverse=True
+    )
+
+    lines = ["🧾 *RIWAYAT INSTALLASI KAMU:*\n"]
+    for inst in my_installs_sorted:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(inst["created_at"]))
+        lines.append(
+            f"• `{inst['install_id']}` – *{inst['os_name']}* (`{inst['os_id']}`)\n"
+            f"  VPS: `{inst['ip']}:{inst['port']}`\n"
+            f"  Status: *{inst['status'].upper()}* – {ts}\n"
+        )
+
+    await message.reply_markdown("\n".join(lines))
+
+
+# =====================================================
+# CALLBACK MENU
+# =====================================================
+
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    user = query.from_user
+
+    if data == "menu_main":
+        await query.edit_message_text(
+            text=f"🏠 *Menu Utama {BOT_NAME}*",
+            reply_markup=build_main_menu(),
+            parse_mode="Markdown",
+        )
+        return
+
+    if data == "menu_oslist":
+        await query.edit_message_text(
+            text=format_oslist_text(),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Kembali", callback_data="menu_main")]]
+            ),
+        )
+        return
+
+    if data == "menu_install":
+        await query.edit_message_text(
+            text=(
+                "🚀 *INSTALL OS VPS*\n\n"
+                "Gunakan format perintah berikut di chat:\n\n"
+                "`/install ip port os_id`\n"
+                "Contoh:\n"
+                "`/install 128.199.59.22 22 win-10-pro`"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Kembali", callback_data="menu_main")]]
+            ),
+        )
+        return
+
+    if data == "menu_account":
+        users = get_users()
+        info = users.get(str(user.id))
+        if not info:
+            text = (
+                "👤 Kamu belum login.\n\n"
+                "Daftar / login dengan:\n"
+                "`/login username password`"
+            )
+        else:
+            text = (
+                "👤 *Info Akun*\n\n"
+                f"ID Telegram: `{user.id}`\n"
+                f"Username bot: *{info.get('username', '-') }*\n"
+            )
+
+        await query.edit_message_text(
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Kembali", callback_data="menu_main")]]
+            ),
+        )
+        return
+
+    if data == "menu_status":
+        # manual check login
+        users = get_users()
+        if str(user.id) not in users:
+            await query.edit_message_text(
+                text=(
+                    "❌ Kamu belum login.\n"
+                    "Gunakan: `/login username password`"
+                ),
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Kembali", callback_data="menu_main")]]
+                ),
+            )
+            return
+
+        installs = get_installs()
+        my_installs = [
+            i for i in installs
+            if i["user_id"] == user.id and i["status"] in ("pending", "running")
+        ]
+
+        if not my_installs:
+            text = "Tidak ada instalasi aktif / pending."
+        else:
+            lines = ["📊 *STATUS INSTALL AKTIF:*\n"]
+            for inst in my_installs:
+                ts = time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(inst["created_at"])
+                )
+                lines.append(
+                    f"• `{inst['install_id']}` – *{inst['os_name']}*\n"
+                    f"  VPS: `{inst['ip']}:{inst['port']}`\n"
+                    f"  Status: *{inst['status'].upper()}* (dibuat {ts})\n"
+                )
+            text = "\n".join(lines)
+
+        await query.edit_message_text(
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Kembali", callback_data="menu_main")]]
+            ),
+        )
+        return
+
+    if data == "menu_history":
+        users = get_users()
+        if str(user.id) not in users:
+            await query.edit_message_text(
+                text=(
+                    "❌ Kamu belum login.\n"
+                    "Gunakan: `/login username password`"
+                ),
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Kembali", callback_data="menu_main")]]
+                ),
+            )
+            return
+
+        installs = get_installs()
+        my_installs = [i for i in installs if i["user_id"] == user.id]
+
+        if not my_installs:
+            text = "Belum ada riwayat instalasi."
+        else:
+            my_installs_sorted = sorted(
+                my_installs, key=lambda x: x["created_at"], reverse=True
+            )
+            lines = ["🧾 *RIWAYAT INSTALLASI KAMU:*\n"]
+            for inst in my_installs_sorted:
+                ts = time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(inst["created_at"])
+                )
+                lines.append(
+                    f"• `{inst['install_id']}` – *{inst['os_name']}* (`{inst['os_id']}`)\n"
+                    f"  VPS: `{inst['ip']}:{inst['port']}`\n"
+                    f"  Status: *{inst['status'].upper()}* – {ts}\n"
+                )
+            text = "\n".join(lines)
+
+        await query.edit_message_text(
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Kembali", callback_data="menu_main")]]
+            ),
+        )
+        return
+
+
+# =====================================================
+# MAIN
+# =====================================================
+
+def main():
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("help", help_cmd))
+
+    app.add_handler(CommandHandler("login", login_cmd))
+    app.add_handler(CommandHandler("me", me_cmd))
+    app.add_handler(CommandHandler("logout", logout_cmd))
+
+    app.add_handler(CommandHandler("oslist", oslist_cmd))
+    app.add_handler(CommandHandler("install", install_cmd))
+    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("history", history_cmd))
+
+    app.add_handler(CallbackQueryHandler(menu_callback))
+
+    logger.info("Bot started...")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
